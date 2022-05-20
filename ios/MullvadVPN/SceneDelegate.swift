@@ -147,6 +147,10 @@ extension SceneDelegate: UIWindowSceneDelegate {
         setupScene(windowFactory: SceneWindowFactory(windowScene: windowScene))
     }
 
+    func scene(_ scene: UIScene, continue userActivity: NSUserActivity) {
+        // no-op
+    }
+
     func sceneDidDisconnect(_ scene: UIScene) {
         // no-op
     }
