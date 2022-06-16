@@ -4,11 +4,11 @@ use mullvad_types::{
         Constraint, LocationConstraint, Match, OpenVpnConstraints, Ownership, Providers,
         RelayConstraints, WireguardConstraints,
     },
-    relay_list::{Relay, RelayTunnels, WireguardEndpointData},
+    relay_list::{Relay, RelayEndpointData, OpenVpnEndpointData, WireguardEndpointData},
 };
-use rand::{seq::SliceRandom, Rng};
+use rand::Rng;
 use std::net::{IpAddr, SocketAddr};
-use talpid_types::net::{all_of_the_internet, wireguard, IpVersion, TunnelType};
+use talpid_types::net::{all_of_the_internet, wireguard, Endpoint, IpVersion, TransportProtocol, TunnelType};
 
 #[derive(Clone)]
 pub struct RelayMatcher<T: TunnelMatcher> {
@@ -18,22 +18,24 @@ pub struct RelayMatcher<T: TunnelMatcher> {
     pub tunnel: T,
 }
 
-impl From<RelayConstraints> for RelayMatcher<AnyTunnelMatcher> {
-    fn from(constraints: RelayConstraints) -> Self {
+impl RelayMatcher<AnyTunnelMatcher> {
+    pub fn new(
+        constraints: RelayConstraints,
+        openvpn_data: OpenVpnEndpointData,
+        wireguard_data: WireguardEndpointData,
+    ) -> Self {
         Self {
             location: constraints.location,
             providers: constraints.providers,
             ownership: constraints.ownership,
             tunnel: AnyTunnelMatcher {
-                wireguard: constraints.wireguard_constraints.into(),
-                openvpn: constraints.openvpn_constraints,
+                wireguard: WireguardMatcher::new(constraints.wireguard_constraints, wireguard_data),
+                openvpn: OpenVpnMatcher::new(constraints.openvpn_constraints, openvpn_data),
                 tunnel_type: constraints.tunnel_protocol,
             },
         }
     }
-}
 
-impl RelayMatcher<AnyTunnelMatcher> {
     pub fn to_wireguard_matcher(self) -> RelayMatcher<WireguardMatcher> {
         RelayMatcher {
             tunnel: self.tunnel.wireguard,
@@ -75,6 +77,7 @@ impl<T: TunnelMatcher> RelayMatcher<T> {
 pub trait TunnelMatcher: Clone {
     /// Filter a relay and its endpoints based on constraints.
     /// Only matching endpoints are included in the returned Relay.
+    /// TODO: update desc here
     fn filter_matching_endpoints(&self, relay: &Relay) -> Option<Relay>;
     /// Constructs a MullvadEndpoint for a given Relay using extra data from the relay matcher
     /// itself.
@@ -83,35 +86,51 @@ pub trait TunnelMatcher: Clone {
 
 impl TunnelMatcher for OpenVpnMatcher {
     fn filter_matching_endpoints(&self, relay: &Relay) -> Option<Relay> {
-        let tunnels = relay
-            .tunnels
-            .openvpn
-            .iter()
-            .filter(|endpoint| self.matches(endpoint))
-            .cloned()
-            .collect::<Vec<_>>();
-        if tunnels.is_empty() {
+        // FIXME: match against shared endpoint data
+        if !matches!(relay.endpoint_data, RelayEndpointData::Openvpn) {
             return None;
         }
-        let mut relay = relay.clone();
-        relay.tunnels = RelayTunnels {
-            openvpn: tunnels,
-            wireguard: vec![],
-        };
-        Some(relay)
+        Some(relay.clone())
     }
 
     fn mullvad_endpoint(&self, relay: &Relay) -> Option<MullvadEndpoint> {
-        relay
-            .tunnels
-            .openvpn
-            .choose(&mut rand::thread_rng())
-            .cloned()
-            .map(|endpoint| endpoint.into_mullvad_endpoint(relay.ipv4_addr_in.into()))
+        // FIXME: use shared endpoint data & pubkey
+        Some(MullvadEndpoint::OpenVpn(Endpoint::new(
+            relay.ipv4_addr_in,
+            // FIXME: select a random port-protocol pair
+            53,
+            TransportProtocol::Udp,
+        )))
     }
 }
 
-pub type OpenVpnMatcher = OpenVpnConstraints;
+#[derive(Debug, Clone)]
+pub struct OpenVpnMatcher {
+    pub constraints: OpenVpnConstraints,
+    pub data: OpenVpnEndpointData,
+}
+
+impl OpenVpnMatcher {
+    pub fn new(constraints: OpenVpnConstraints, data: OpenVpnEndpointData) -> Self {
+        Self { constraints, data }
+    }
+}
+
+impl Match<OpenVpnEndpointData> for OpenVpnMatcher {
+    fn matches(&self, endpoint: &OpenVpnEndpointData) -> bool {
+        match self.constraints.port {
+            Constraint::Any => true,
+            Constraint::Only(transport_port) => endpoint
+                .ports
+                .iter()
+                .any(|endpoint| {
+                    transport_port.protocol == endpoint.protocol &&
+                        (transport_port.port.is_any() ||
+                            transport_port.port == Constraint::Only(endpoint.port))
+                }),
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct AnyTunnelMatcher {
@@ -132,11 +151,10 @@ impl TunnelMatcher for AnyTunnelMatcher {
                 let openvpn_relay = self.openvpn.filter_matching_endpoints(relay);
 
                 match (wireguard_relay, openvpn_relay) {
-                    (Some(mut matched_relay), Some(openvpn_relay)) => {
-                        matched_relay.tunnels.openvpn = openvpn_relay.tunnels.openvpn;
-                        Some(matched_relay)
-                    }
                     (Some(relay), None) | (None, Some(relay)) => Some(relay),
+                    (Some(_), Some(_)) => {
+                        unreachable!("relay cannot match multiple endpoint types")
+                    }
                     _ => None,
                 }
             }
@@ -150,15 +168,9 @@ impl TunnelMatcher for AnyTunnelMatcher {
     fn mullvad_endpoint(&self, relay: &Relay) -> Option<MullvadEndpoint> {
         #[cfg(not(target_os = "android"))]
         match self.tunnel_type {
-            Constraint::Any => vec![
-                self.openvpn.mullvad_endpoint(relay),
-                self.wireguard.mullvad_endpoint(relay),
-            ]
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>()
-            .choose(&mut rand::thread_rng())
-            .cloned(),
+            Constraint::Any => self.openvpn.mullvad_endpoint(relay).or_else(|| {
+                self.wireguard.mullvad_endpoint(relay)
+            }),
             Constraint::Only(TunnelType::OpenVpn) => self.openvpn.mullvad_endpoint(relay),
             Constraint::Only(TunnelType::Wireguard) => self.wireguard.mullvad_endpoint(relay),
         }
@@ -168,25 +180,43 @@ impl TunnelMatcher for AnyTunnelMatcher {
     }
 }
 
-#[derive(Clone)]
+#[derive(Default, Clone)]
 pub struct WireguardMatcher {
     /// The peer is an already selected peer relay to be used with multihop.
     /// It's stored here so we can exclude it from further selections being made.
     pub peer: Option<Relay>,
     pub port: Constraint<u16>,
     pub ip_version: Constraint<IpVersion>,
+
+    pub data: WireguardEndpointData,
 }
 
 impl WireguardMatcher {
+    pub fn new(constraints: WireguardConstraints, data: WireguardEndpointData) -> Self {
+        Self {
+            peer: None,
+            port: constraints.port,
+            ip_version: constraints.ip_version,
+            data,
+        }
+    }
+
+    pub fn from_endpoint(data: WireguardEndpointData) -> Self {
+        Self {
+            data,
+            ..Default::default()
+        }
+    }
+
     fn wg_data_to_endpoint(
         &self,
         relay: &Relay,
-        data: WireguardEndpointData,
+        data: &WireguardEndpointData,
     ) -> Option<MullvadEndpoint> {
         let host = self.get_address_for_wireguard_relay(relay)?;
-        let port = self.get_port_for_wireguard_relay(&data)?;
+        let port = self.get_port_for_wireguard_relay(data)?;
         let peer_config = wireguard::PeerConfig {
-            public_key: data.public_key,
+            public_key: relay.endpoint_data.unwrap_wireguard_ref().public_key.clone(),
             endpoint: SocketAddr::new(host, port),
             allowed_ips: all_of_the_internet(),
             psk: None,
@@ -244,28 +274,6 @@ impl WireguardMatcher {
     }
 }
 
-impl From<WireguardConstraints> for WireguardMatcher {
-    fn from(constraints: WireguardConstraints) -> Self {
-        Self {
-            peer: None,
-            port: constraints.port,
-            ip_version: constraints.ip_version,
-        }
-    }
-}
-
-impl Match<WireguardEndpointData> for WireguardMatcher {
-    fn matches(&self, endpoint: &WireguardEndpointData) -> bool {
-        match self.port {
-            Constraint::Any => true,
-            Constraint::Only(port) => endpoint
-                .port_ranges
-                .iter()
-                .any(|range| (port >= range.0 && port <= range.1)),
-        }
-    }
-}
-
 impl TunnelMatcher for WireguardMatcher {
     fn filter_matching_endpoints(&self, relay: &Relay) -> Option<Relay> {
         if self
@@ -276,30 +284,13 @@ impl TunnelMatcher for WireguardMatcher {
         {
             return None;
         }
-
-        let tunnels = relay
-            .tunnels
-            .wireguard
-            .iter()
-            .filter(|endpoint| self.matches(*endpoint))
-            .cloned()
-            .collect::<Vec<_>>();
-        if tunnels.is_empty() {
+        if !matches!(relay.endpoint_data, RelayEndpointData::Wireguard(..)) {
             return None;
         }
-        let mut relay = relay.clone();
-        relay.tunnels = RelayTunnels {
-            wireguard: tunnels,
-            openvpn: vec![],
-        };
-        Some(relay)
+        Some(relay.clone())
     }
 
     fn mullvad_endpoint(&self, relay: &Relay) -> Option<MullvadEndpoint> {
-        relay
-            .tunnels
-            .wireguard
-            .choose(&mut rand::thread_rng())
-            .and_then(|wg_tunnel| self.wg_data_to_endpoint(relay, (*wg_tunnel).clone()))
+        self.wg_data_to_endpoint(relay, &self.data)
     }
 }
