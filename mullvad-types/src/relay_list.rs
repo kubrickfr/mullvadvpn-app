@@ -26,6 +26,7 @@ pub struct RelayList {
     pub openvpn: OpenVpnEndpointData,
     #[cfg_attr(target_os = "android", jnix(skip))]
     pub bridge: BridgeEndpointData,
+    #[cfg_attr(target_os = "android", jnix(skip))]
     pub wireguard: WireguardEndpointData,
 }
 
@@ -79,7 +80,6 @@ pub struct Relay {
     pub provider: String,
     #[cfg_attr(target_os = "android", jnix(skip))]
     pub weight: u64,
-    #[cfg_attr(target_os = "android", jnix(skip))]
     pub endpoint_data: RelayEndpointData,
     #[cfg_attr(target_os = "android", jnix(skip))]
     pub location: Option<Location>,
@@ -88,6 +88,8 @@ pub struct Relay {
 /// Specifies the type of a relay or relay-specific endpoint data.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(target_os = "android", derive(IntoJava))]
+#[cfg_attr(target_os = "android", jnix(package = "net.mullvad.mullvadvpn.model"))]
 pub enum RelayEndpointData {
     Openvpn,
     Bridge,
