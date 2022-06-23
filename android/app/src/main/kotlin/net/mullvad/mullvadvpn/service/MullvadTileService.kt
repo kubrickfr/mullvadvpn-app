@@ -26,8 +26,6 @@ class MullvadTileService : TileService() {
     private lateinit var unsecuredIcon: Icon
 
     override fun onCreate() {
-        super.onCreate()
-
         securedIcon = Icon.createWithResource(this, R.drawable.small_logo_white)
         unsecuredIcon = Icon.createWithResource(this, R.drawable.small_logo_black)
     }
