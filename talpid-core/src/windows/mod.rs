@@ -72,6 +72,11 @@ pub enum Error {
     #[error(display = "Found no addresses for the given adapter")]
     NoUnicastAddress,
 
+    /// Error returned from `CreateUnicastIpAddressEntry`
+    #[cfg(windows)]
+    #[error(display = "Failed to create unicast IP address")]
+    CreateUnicastEntry(#[error(source)] io::Error),
+
     /// Unexpected DAD state returned for a unicast address
     #[cfg(windows)]
     #[error(display = "Unexpected DAD state")]
@@ -355,6 +360,28 @@ pub fn get_ip_address_for_interface(
         Some(row) => Ok(Some(try_socketaddr_from_inet_sockaddr(row.Address)?.ip())),
         None => Ok(None),
     }
+}
+
+pub fn add_ip_address_for_interface(luid: NET_LUID, address: IpAddr) -> Result<()> {
+    let mut row = unsafe { mem::zeroed() };
+    unsafe { InitializeUnicastIpAddressEntry(&mut row) };
+
+    let socketaddr = match address {
+        IpAddr::V4(addr) => SocketAddr::V4(SocketAddrV4::new(addr, 0)),
+        IpAddr::V6(addr) => SocketAddr::V6(SocketAddrV6::new(addr, 0, 0, 0)),
+    };
+
+    row.InterfaceLuid = luid;
+    row.Address = inet_sockaddr_from_socketaddr(socketaddr)?;
+    row.DadState = IpDadStatePreferred;
+
+    let status = unsafe { CreateUnicastIpAddressEntry(&row) };
+    if status != NO_ERROR {
+        return Err(Error::CreateUnicastEntry(io::Error::from_raw_os_error(
+            status as i32,
+        )));
+    }
+    Ok(())
 }
 
 /// Returns the unicast IP address table. If `family` is `None`, then addresses for all families are

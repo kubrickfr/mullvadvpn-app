@@ -3,5 +3,4 @@ EXPORTS
 	WinNet_EnsureBestMetric
 	WinNet_ActivateRouteManager
 	WinNet_DeactivateRouteManager
-	WinNet_AddDeviceIpAddresses
 	WinNet_GetBestDefaultRoute
