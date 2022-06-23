@@ -33,14 +33,17 @@ class MullvadTileService : TileService() {
     }
 
     override fun onClick() {
-        val intent = Intent(this, MullvadVpnService::class.java).apply {
-            action = if (qsTile.state == Tile.STATE_ACTIVE) {
-                MullvadVpnService.KEY_DISCONNECT_ACTION
-            } else {
-                MullvadVpnService.KEY_CONNECT_ACTION
+        // Workaround for the reported bug: https://issuetracker.google.com/issues/236862865
+        val awaitUnlockPropagation = {
+            while (isLocked) {
+                Thread.sleep(100)
             }
         }
-        startForegroundService(intent)
+
+        unlockAndRun {
+            awaitUnlockPropagation()
+            toggleTunnel()
+        }
     }
 
     override fun onStartListening() {
@@ -49,6 +52,19 @@ class MullvadTileService : TileService() {
 
     override fun onStopListening() {
         listenerJob?.cancel()
+    }
+
+    private fun toggleTunnel() {
+        val intent = Intent(this, MullvadVpnService::class.java).apply {
+            action = if (qsTile.state == Tile.STATE_INACTIVE) {
+                MullvadVpnService.KEY_CONNECT_ACTION
+            } else {
+                MullvadVpnService.KEY_DISCONNECT_ACTION
+            }
+        }
+
+        // Always start as foreground in case tile is out-of-sync.
+        startForegroundService(intent)
     }
 
     @OptIn(FlowPreview::class)
